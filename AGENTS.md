@@ -7,7 +7,8 @@
 
 ## Build, Test, and Development Commands
 - No build or test scripts are checked into this repo.
-- To run locally, open `app.jsx` in the host environment you are using for React (for example, a sandbox or a bundler project you set up separately). If you add tooling, document the exact commands here.
+- To run locally, open `index.html` in a browser (it includes the app inline). For GitHub Pages, commit `index.html`.
+- After editing code in `src/`, regenerate the standalone file with:\n  `python3 scripts/regenerate_index.py`
 
 ## Coding Style & Naming Conventions
 - Indentation: 2 spaces; use semicolons and single quotes as in `app.jsx`.
