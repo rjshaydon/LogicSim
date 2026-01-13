@@ -229,9 +229,10 @@ const buildNetlist = (nodes, wires) => {
 };
 
 const simulateGraph = (nodes, wires, depth = 0, updateClocks = true, cachedNetlist = null) => {
-  if (depth > 20) return nodes;
+  if (depth > 20) return { nodes, changed: false };
   const nodeMap = new Map();
   for (let i = 0; i < nodes.length; i++) nodeMap.set(nodes[i].id, nodes[i]);
+  let changed = false;
 
   nodes.forEach(n => {
     if (!n.outputState) n.outputState = {};
@@ -313,15 +314,37 @@ const simulateGraph = (nodes, wires, depth = 0, updateClocks = true, cachedNetli
         case '7SEG': n.state = { a: getBool(iState.a), b: getBool(iState.b), c: getBool(iState.c), d: getBool(iState.d), e: getBool(iState.e), f: getBool(iState.f), g: getBool(iState.g), dp: getBool(iState.dp) }; break;
         default:
           if (n.internalData && n.internalData.nodes) {
-            let inputHash = "";
-            if (n.inputs) n.inputs.forEach(inp => { const val = iState[inp.id]; inputHash += (Array.isArray(val) ? val.join('') : val) + "|"; });
             const iNodes = n.internalData.nodes;
             const iWires = n.internalData.wires;
-            const sortedInps = iNodes.filter(x => x.type.startsWith('PIN_IN')).sort((a, b) => a.y - b.y);
+            if (n._cachedInternalNodes !== iNodes) {
+              n._cachedInternalNodes = iNodes;
+              n._sortedInPins = iNodes.filter(x => x.type.startsWith('PIN_IN')).sort((a, b) => a.y - b.y);
+              n._sortedOutPins = iNodes.filter(x => x.type.startsWith('PIN_OUT')).sort((a, b) => a.y - b.y);
+              n._hasClock = iNodes.some(x => x.type === 'CLOCK');
+            }
+            const sortedInps = n._sortedInPins || [];
             if (n.inputs) n.inputs.forEach((inp, idx) => { const internalPin = sortedInps[idx]; if (internalPin) { internalPin.state = iState[inp.id]; if (!internalPin.outputState) internalPin.outputState = {}; internalPin.outputState.out = iState[inp.id]; } });
-            const hasClock = iNodes.some(x => x.type === 'CLOCK');
-            if (hasClock || inputHash !== n._prevInputHash || pass === 0) { simulateGraph(iNodes, iWires, depth + 1, false); n._prevInputHash = inputHash; }
-            const sortedOuts = iNodes.filter(x => x.type.startsWith('PIN_OUT')).sort((a, b) => a.y - b.y);
+            let inputChanged = false;
+            if (!n._lastInputs) n._lastInputs = {};
+            if (n.inputs) {
+              const currentIds = new Set();
+              n.inputs.forEach(inp => {
+                currentIds.add(inp.id);
+                const val = iState[inp.id];
+                if (!valsEqual(n._lastInputs[inp.id], val)) {
+                  inputChanged = true;
+                  n._lastInputs[inp.id] = Array.isArray(val) ? val.slice() : val;
+                }
+              });
+              Object.keys(n._lastInputs).forEach(key => {
+                if (!currentIds.has(key)) {
+                  inputChanged = true;
+                  delete n._lastInputs[key];
+                }
+              });
+            }
+            if (n._hasClock || inputChanged || pass === 0) { simulateGraph(iNodes, iWires, depth + 1, false); }
+            const sortedOuts = n._sortedOutPins || [];
             if (n.outputs) n.outputs.forEach((outp, idx) => { const internalPin = sortedOuts[idx]; if (internalPin) n.outputState[outp.id] = internalPin.inputState?.in || false; });
           }
           break;
@@ -335,9 +358,10 @@ const simulateGraph = (nodes, wires, depth = 0, updateClocks = true, cachedNetli
         if (j) j.outputState.joint = net.value;
       }
     }
+    if (anyOutputChanged) changed = true;
     if (pass > 0 && !anyOutputChanged) break;
   }
-  return nodes;
+  return { nodes, changed };
 };
 
 // --- Helper for Migration ---
@@ -454,18 +478,17 @@ const estimateDisplayWidth = (nodes) => {
 };
 
 const cleanNodeForDiff = (n) => { const { inputState, outputState, internalData, def, state, ...rest } = n; return rest; };
-const getNetForWire = (startWireIndex, wires, nodes) => {
+const getNetForWire = (startWireIndex, wires, nodes, wireAdj) => {
     const net = new Set();
     const queue = [startWireIndex];
     const visitedWires = new Set([startWireIndex]);
     const nodeMap = new Map(nodes.map(n => [n.id, n]));
     const addConnectedWires = (nodeId) => {
-        wires.forEach((w, idx) => {
+        const edges = wireAdj.get(nodeId) || [];
+        edges.forEach(idx => {
             if (!visitedWires.has(idx)) {
-                if (w.fromNode === nodeId || w.toNode === nodeId) {
-                    visitedWires.add(idx);
-                    queue.push(idx);
-                }
+                visitedWires.add(idx);
+                queue.push(idx);
             }
         });
     };
@@ -564,6 +587,9 @@ export default function App() {
   const [future, setFuture] = useState([]); 
   const [clipboard, setClipboard] = useState(null);
   const dragStartSnapshotRef = useRef(null);
+  const dragRafRef = useRef(null);
+  const dragStateRef = useRef(null);
+  const pendingDragRef = useRef(null);
   
   const [collections, setCollections] = useState(['I/O', 'Gates', 'Basic', 'Bus', 'Output']); 
   const [collapsedCategories, setCollapsedCategories] = useState(new Set());
@@ -607,6 +633,31 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   
   const cachedNetlist = useMemo(() => buildNetlist(nodes, wires), [wires, nodes.length, activeTabId]);
+  const nodeById = useMemo(() => {
+    const map = new Map();
+    nodes.forEach(n => map.set(n.id, n));
+    return map;
+  }, [nodes]);
+  const wireAdj = useMemo(() => {
+    const byNode = new Map();
+    wires.forEach((w, idx) => {
+      if (!byNode.has(w.fromNode)) byNode.set(w.fromNode, []);
+      if (!byNode.has(w.toNode)) byNode.set(w.toNode, []);
+      byNode.get(w.fromNode).push(idx);
+      byNode.get(w.toNode).push(idx);
+    });
+    return byNode;
+  }, [wires]);
+  const portPositions = useMemo(() => {
+    const map = new Map();
+    nodes.forEach(n => {
+      const entry = new Map();
+      (n.inputs || []).forEach(p => entry.set(`in:${p.id}`, getPortPosition(n, p.id, true)));
+      (n.outputs || []).forEach(p => entry.set(`out:${p.id}`, getPortPosition(n, p.id, false)));
+      map.set(n.id, entry);
+    });
+    return map;
+  }, [nodes]);
 
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null); 
@@ -651,6 +702,7 @@ export default function App() {
 
   const stateRef = useRef({ nodes, wires, selectedNodeIds, mousePos });
   useEffect(() => { stateRef.current = { nodes, wires, selectedNodeIds, mousePos }; }, [nodes, wires, selectedNodeIds, mousePos]);
+  useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
 
   const snapshot = useCallback(() => {
     setHistory(prev => {
@@ -1390,9 +1442,9 @@ export default function App() {
       setNodes(currentNodes => {
         try {
           const simulationNodes = [...currentNodes];
-          const next = simulateGraph(simulationNodes, wires, 0, true, cachedNetlist);
+          const result = simulateGraph(simulationNodes, wires, 0, true, cachedNetlist);
           simErrorOnceRef.current = false;
-          return next;
+          return result.changed ? result.nodes : currentNodes;
         } catch (e) {
           if (!simErrorOnceRef.current) {
             console.error("simulateGraph failed:", e);
@@ -1436,15 +1488,23 @@ export default function App() {
     
     if (!dragState && e.target.tagName === 'path' && e.target.hasAttribute('data-wire-index')) {
         const idx = parseInt(e.target.getAttribute('data-wire-index'));
-        if (hoveredWireIndex !== idx) { setHoveredWireIndex(idx); setHoveredNet(getNetForWire(idx, wires, nodes)); }
+        if (hoveredWireIndex !== idx) { setHoveredWireIndex(idx); setHoveredNet(getNetForWire(idx, wires, nodes, wireAdj)); }
     } else if (!dragState) { if (hoveredWireIndex !== null) { setHoveredWireIndex(null); setHoveredNet(new Set()); } }
 
     if (dragState.type === 'PAN') { setPan({ x: dragState.initialPan.x + e.clientX - dragState.startX, y: dragState.initialPan.y + e.clientY - dragState.startY }); }
     else if (dragState.type === 'NODE') { 
-        setNodes(prev => prev.map(n => dragState.ids.includes(n.id) ? { ...n, x: snapToGrid(dragState.initialPositions[n.id].x + coords.worldX - dragState.startX), y: snapToGrid(dragState.initialPositions[n.id].y + coords.worldY - dragState.startY) } : n)); 
-        // Track if actual movement occurred for undo logic
-        if (!dragState.hasMoved && (Math.abs(coords.worldX - dragState.startX) > 1 || Math.abs(coords.worldY - dragState.startY) > 1)) {
-            setDragState(prev => ({...prev, hasMoved: true}));
+        pendingDragRef.current = coords;
+        if (!dragRafRef.current) {
+            dragRafRef.current = requestAnimationFrame(() => {
+                dragRafRef.current = null;
+                const latest = pendingDragRef.current;
+                const currentDrag = dragStateRef.current;
+                if (!latest || !currentDrag || currentDrag.type !== 'NODE') return;
+                setNodes(prev => prev.map(n => currentDrag.ids.includes(n.id) ? { ...n, x: snapToGrid(currentDrag.initialPositions[n.id].x + latest.worldX - currentDrag.startX), y: snapToGrid(currentDrag.initialPositions[n.id].y + latest.worldY - currentDrag.startY) } : n));
+                if (!currentDrag.hasMoved && (Math.abs(latest.worldX - currentDrag.startX) > 1 || Math.abs(latest.worldY - currentDrag.startY) > 1)) {
+                    setDragState(prev => prev ? ({ ...prev, hasMoved: true }) : prev);
+                }
+            });
         }
     } 
     else if (dragState.type === 'SELECT') { setDragState(prev => ({ ...prev, currentX: coords.worldX, currentY: coords.worldY })); const x1 = Math.min(dragState.startX, coords.worldX); const x2 = Math.max(dragState.startX, coords.worldX); const y1 = Math.min(dragState.startY, coords.worldY); const y2 = Math.max(dragState.startY, coords.worldY); const newSel = new Set(); nodes.forEach(n => { if (n.x >= x1 && n.x <= x2 && n.y >= y1 && n.y <= y2) newSel.add(n.id); }); setSelectedNodeIds(newSel); } 
@@ -1452,6 +1512,11 @@ export default function App() {
   };
 
   const handleMouseUp = (e) => {
+    if (dragRafRef.current) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
+    }
+    pendingDragRef.current = null;
     if (!dragState) {
         if (placementQueue.length > 0) {
             snapshot(); 
@@ -1613,9 +1678,12 @@ export default function App() {
             <div style={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`, transformOrigin: '0 0', width:'100%', height:'100%' }}>
               <svg className="absolute inset-0 overflow-visible pointer-events-auto">
                 {wires.map((w, i) => {
-                  const n1 = nodes.find(n => n.id === w.fromNode); const n2 = nodes.find(n => n.id === w.toNode);
+                  const n1 = nodeById.get(w.fromNode); const n2 = nodeById.get(w.toNode);
                   if (!n1 || !n2) return null;
-                  const p1 = getPortPosition(n1, w.fromPort, false); const p2 = getPortPosition(n2, w.toPort, true);
+                  const p1Entry = portPositions.get(n1.id);
+                  const p2Entry = portPositions.get(n2.id);
+                  const p1 = (p1Entry && p1Entry.get(`out:${w.fromPort}`)) || getPortPosition(n1, w.fromPort, false);
+                  const p2 = (p2Entry && p2Entry.get(`in:${w.toPort}`)) || getPortPosition(n2, w.toPort, true);
                   
                   const portName = (n1.type === 'JOINT') ? 'joint' : w.fromPort;
                   const val = n1.outputState?.[portName];
@@ -1628,7 +1696,7 @@ export default function App() {
                   
                   const isHovered = hoveredNet.has(i); const displayWidth = isHovered ? strokeWidth * 2 : strokeWidth; const displayColor = isHovered ? (isBus ? '#d8b4fe' : '#fca5a5') : strokeColor;
                   
-                  return <g key={`wire-${i}`} onMouseEnter={() => { setHoveredWireIndex(i); setHoveredNet(getNetForWire(i, wires, nodes)); }} onMouseLeave={() => { setHoveredWireIndex(null); setHoveredNet(new Set()); }}> <path d={`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`} stroke="transparent" strokeWidth="20" fill="none" data-wire-index={i} className="cursor-pointer"/> <path d={`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`} stroke={displayColor} strokeWidth={displayWidth} fill="none" strokeLinecap="round" className="pointer-events-none transition-all duration-150"/> </g>;
+                  return <g key={`wire-${i}`} onMouseEnter={() => { setHoveredWireIndex(i); setHoveredNet(getNetForWire(i, wires, nodes, wireAdj)); }} onMouseLeave={() => { setHoveredWireIndex(null); setHoveredNet(new Set()); }}> <path d={`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`} stroke="transparent" strokeWidth="20" fill="none" data-wire-index={i} className="cursor-pointer"/> <path d={`M ${p1.x} ${p1.y} L ${p2.x} ${p2.y}`} stroke={displayColor} strokeWidth={displayWidth} fill="none" strokeLinecap="round" className="pointer-events-none transition-all duration-150"/> </g>;
                 })}
                 {dragState?.type==='WIRE' && <path d={`M ${dragState.startX} ${dragState.startY} L ${dragState.currentX} ${dragState.currentY}`} stroke="white" strokeWidth="2" strokeDasharray="5,5" fill="none"/>}
               </svg>
