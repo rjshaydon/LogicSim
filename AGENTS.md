@@ -1,14 +1,16 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `app.jsx` contains the entire React application (UI, state, and logic) in a single file.
-- There are no separate `src/`, `tests/`, or asset directories at this time.
-- Add new modules only if you plan to split the file; keep related logic grouped (e.g., helpers near usage).
+- `src/App.jsx` contains the full React application (UI, state, and logic).
+- `src/components/` contains supporting UI components used by `src/App.jsx`.
+- `index.html` is the standalone bundle generated from `src/` and is the file that runs in a browser.
 
 ## Build, Test, and Development Commands
 - No build or test scripts are checked into this repo.
-- To run locally, open `index.html` in a browser (it includes the app inline). For GitHub Pages, commit `index.html`.
-- After editing code in `src/`, regenerate the standalone file with:\n  `python3 scripts/regenerate_index.py`
+- To run locally, open `index.html` in a browser (it includes the app inline).
+- For GitHub Pages or sharing a URL, commit the regenerated `index.html`.
+- After editing code in `src/`, regenerate the standalone file with:
+  `python3 scripts/regenerate_index.py`
 
 ## Coding Style & Naming Conventions
 - Indentation: 2 spaces; use semicolons and single quotes as in `app.jsx`.
@@ -21,7 +23,7 @@
 - If you add tests, document the framework, naming conventions, and commands (e.g., `*.test.jsx` in `tests/`).
 
 ## Commit & Pull Request Guidelines
-- Commit history is minimal; the existing message uses a short summary with a colon (e.g., `Baseline: original app.jsx (pre-refactor)`). Follow that style for consistency.
+- Use short, descriptive commit messages (e.g., `Regenerate index.html`).
 - PRs should include a brief description of the change, screenshots for UI adjustments, and any manual testing performed.
 
 ## Configuration & Security Notes
@@ -35,10 +37,9 @@
 ## Constraints
 - Make minimal, surgical changes.
 - Don’t refactor unless asked to.
-– Don’t rename files.
-– Don’t change formatting.”
+- Don’t rename files.
+- Don’t change formatting.
 
-## Run instructions: the exact commands to run tests/dev server (e.g. npm install, npm run dev, etc.)
-
-## Safety
-– Always show a plan first, then make changes if the user is happy; ask for confirmation.
+## Run Instructions
+- No test or dev server commands are configured.
+- Regenerate the standalone HTML after edits: `python3 scripts/regenerate_index.py`
